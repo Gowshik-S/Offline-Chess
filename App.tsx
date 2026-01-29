@@ -4,8 +4,9 @@ import LZString from 'lz-string';
 import QRCode from 'qrcode';
 import { ChessGame, Position, PieceType, Color, Piece } from './engine';
 
-// Backend server URL - change this to your deployed server URL
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+// Backend server URL - Uses Vite environment variable
+// Set VITE_BACKEND_URL in .env file or Vercel environment variables
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://cb.gowshik.online';
 const WS_URL = BACKEND_URL.replace('http', 'ws');
 
 // Type declaration for BarcodeDetector
