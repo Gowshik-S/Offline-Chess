@@ -1,0 +1,21 @@
+{
+  "name": "Grandmaster Chess",
+  "short_name": "GM Chess",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#302e2b",
+  "theme_color": "#302e2b",
+  "description": "Offline Multiplayer Chess",
+  "icons": [
+    {
+      "src": "https://www.gstatic.com/images/branding/product/2x/chess_512dp.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://www.gstatic.com/images/branding/product/2x/chess_512dp.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Grandmaster Pocket Chess",
+  "description": "A lightweight, offline-capable local multiplayer chess app with optional Gemini AI analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
