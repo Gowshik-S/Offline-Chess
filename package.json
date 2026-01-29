@@ -11,8 +11,6 @@
   "dependencies": {
     "react": "^19.2.4",
     "@google/genai": "^1.38.0",
-    "qrcode": "1.5.3",
-    "jsqr": "1.4.0",
     "lz-string": "1.5.0",
     "react-dom": "^19.2.4"
   },

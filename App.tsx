@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
-import QRCode from 'qrcode';
-import jsQR from 'jsqr';
 import LZString from 'lz-string';
 import { ChessGame, Position, PieceType, Color } from './engine';
 
@@ -33,78 +31,6 @@ const Spinner = () => (
   </svg>
 );
 
-// --- QR Scanner Component ---
-const QRScanner = ({ onScan, onCancel }: { onScan: (data: string) => void; onCancel: () => void }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    let stream: MediaStream | null = null;
-    let animationId: number;
-
-    const startCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.setAttribute("playsinline", "true");
-          videoRef.current.play();
-          requestAnimationFrame(tick);
-        }
-      } catch (err) {
-        console.error("Camera error:", err);
-        onCancel();
-      }
-    };
-
-    const tick = () => {
-      if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA && canvasRef.current) {
-        const canvas = canvasRef.current;
-        const video = videoRef.current;
-        canvas.height = video.videoHeight;
-        canvas.width = video.videoWidth;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const code = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: "dontInvert",
-          });
-          if (code && code.data) {
-            onScan(code.data);
-            return;
-          }
-        }
-      }
-      animationId = requestAnimationFrame(tick);
-    };
-
-    startCamera();
-    return () => {
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      cancelAnimationFrame(animationId);
-    };
-  }, [onScan, onCancel]);
-
-  return (
-    <div className="fixed inset-0 z-[60] bg-[#262421] flex flex-col items-center justify-center p-4">
-      <div className="text-white mb-6 text-center">
-        <h3 className="text-xl font-bold mb-1">Scan QR Code</h3>
-        <p className="text-gray-400 text-sm">Point at your friend's device</p>
-      </div>
-      <div className="relative w-64 h-64 bg-black rounded-lg overflow-hidden border-2 border-[#81b64c]">
-        <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" />
-        <canvas ref={canvasRef} className="hidden" />
-        <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-[#81b64c]"></div>
-        <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-[#81b64c]"></div>
-        <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-[#81b64c]"></div>
-        <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-[#81b64c]"></div>
-      </div>
-      <button onClick={onCancel} className="mt-8 px-8 py-3 bg-[#3a3937] text-white font-bold rounded-lg">Cancel</button>
-    </div>
-  );
-};
-
 export default function App() {
   const [game, setGame] = useState(new ChessGame());
   const [board, setBoard] = useState(game.board);
@@ -124,14 +50,13 @@ export default function App() {
   // App Flow State
   const [view, setView] = useState<'home' | 'lobby' | 'game'>('home');
   const [lobbyMode, setLobbyMode] = useState<'host' | 'join'>('host');
-  const [showHelp, setShowHelp] = useState(false);
   
   // Connection State
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'awaiting-response' | 'connected'>('disconnected');
   const [playerColor, setPlayerColor] = useState<Color>('w');
   const [localCode, setLocalCode] = useState<string>(''); // Code I generate
   const [remoteCodeInput, setRemoteCodeInput] = useState<string>(''); // Code I input
-  const [showScanner, setShowScanner] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
   
   // Room & Player State
   const [roomId, setRoomId] = useState<string>('');
@@ -354,22 +279,21 @@ export default function App() {
 
   // --- UI Components ---
 
-  const [qrUrl, setQrUrl] = useState<string>('');
-  useEffect(() => {
-    if (localCode) {
-      QRCode.toDataURL(localCode, { margin: 1, width: 250, color: { dark: '#000000', light: '#ffffff' } })
-        .then(setQrUrl).catch(console.error);
-    } else {
-      setQrUrl('');
-    }
-  }, [localCode]);
-
   const copyToClipboard = async () => {
     try {
       await navigator.clipboard.writeText(localCode);
-      alert("Code Copied!");
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
     } catch (err) {
-      console.error("Failed to copy", err);
+      // Fallback: select text for manual copy
+      const textArea = document.createElement('textarea');
+      textArea.value = localCode;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
     }
   };
 
@@ -377,9 +301,8 @@ export default function App() {
     try {
       const text = await navigator.clipboard.readText();
       setRemoteCodeInput(text);
-      processRemoteCode(text);
     } catch (err) {
-      alert("Please paste manually.");
+      // User will paste manually
     }
   };
 
@@ -434,166 +357,163 @@ export default function App() {
   }
 
   if (view === 'lobby') {
-    const getStatusColor = (status: string) => {
-      switch (status) {
-        case 'connected': return 'bg-[#81b64c]';
-        case 'ready': return 'bg-yellow-500';
-        default: return 'bg-gray-500';
-      }
-    };
-
-    const getStatusText = () => {
-      switch (connectionStatus) {
-        case 'connected': return '● Connected';
-        case 'awaiting-response': return '◐ Awaiting Response...';
-        case 'connecting': return '○ Waiting for player...';
-        default: return '○ Disconnected';
-      }
-    };
-
     return (
-      <div className="flex flex-col items-center min-h-screen bg-[#302e2b] text-white p-4 overflow-y-auto">
-        {showScanner && <QRScanner onScan={(val) => { setShowScanner(false); processRemoteCode(val); }} onCancel={() => setShowScanner(false)} />}
-        
-        <div className="w-full max-w-md mt-4">
-          <div className="flex justify-between items-center mb-4">
-             <button onClick={() => { setView('home'); peerRef.current?.close(); setPlayers([]); }} className="text-gray-400 hover:text-white">← Back</button>
-             <button onClick={() => setShowHelp(!showHelp)} className="text-[#81b64c] text-sm font-bold">Help?</button>
-          </div>
-
-          <h2 className="text-2xl font-bold mb-1">{lobbyMode === 'host' ? "Create Room" : "Join Room"}</h2>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#302e2b] text-white p-4">
+        <div className="w-full max-w-sm">
           
-          {/* Room Info Banner */}
-          {lobbyMode === 'host' && roomId && (
-            <div className="bg-[#262421] border border-[#81b64c] rounded-lg p-3 mb-4 flex items-center justify-between">
-              <div>
-                <span className="text-xs text-gray-400 uppercase">Room ID</span>
-                <p className="text-2xl font-mono font-bold text-[#81b64c] tracking-widest">{roomId}</p>
-              </div>
-              <div className="text-right">
-                <span className={`text-xs font-semibold ${connectionStatus === 'connected' ? 'text-[#81b64c]' : connectionStatus === 'awaiting-response' ? 'text-yellow-500' : 'text-gray-400'}`}>
-                  {getStatusText()}
-                </span>
-              </div>
-            </div>
-          )}
+          {/* Back Button */}
+          <button 
+            onClick={() => { setView('home'); peerRef.current?.close(); setPlayers([]); setCodeCopied(false); }} 
+            className="text-gray-400 hover:text-white mb-6"
+          >
+            ← Back
+          </button>
 
-          {/* Players in Room Section */}
-          <div className="bg-[#262421] p-4 rounded-xl border border-[#3a3937] mb-4 shadow-md">
-            <h3 className="text-[#81b64c] font-bold text-sm uppercase mb-3 flex items-center gap-2">
-              <span>👥</span> Players in Room
-              <span className="ml-auto text-xs font-normal text-gray-400">{players.length}/2</span>
-            </h3>
-            <div className="space-y-2">
-              {players.length === 0 ? (
-                <div className="text-center py-4 text-gray-500 text-sm">
-                  <span className="animate-pulse">Waiting for players...</span>
-                </div>
-              ) : (
-                players.map((player, idx) => (
-                  <div key={idx} className="flex items-center gap-3 bg-[#3a3937] rounded-lg p-3">
-                    <div className={`w-10 h-10 rounded-md flex items-center justify-center ${player.color === 'w' ? 'bg-gray-200' : 'bg-gray-700'}`}>
-                      <PieceIcon type='k' color={player.color} className="w-6 h-6" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-semibold text-white text-sm">{player.name}</p>
-                      <p className="text-xs text-gray-400">{player.color === 'w' ? 'White' : 'Black'}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${getStatusColor(player.status)} ${player.status !== 'connected' ? 'animate-pulse' : ''}`}></span>
-                      <span className="text-xs text-gray-400 capitalize">{player.status}</span>
-                    </div>
-                  </div>
-                ))
-              )}
+          {lobbyMode === 'host' ? (
+            /* HOST VIEW */
+            <div className="text-center">
+              <h2 className="text-2xl font-bold mb-2">Create Room</h2>
+              <p className="text-gray-400 text-sm mb-6">Share the code below with your friend</p>
               
-              {/* Empty slot */}
-              {players.length === 1 && (
-                <div className="flex items-center gap-3 bg-[#3a3937]/50 rounded-lg p-3 border-2 border-dashed border-gray-600">
-                  <div className="w-10 h-10 rounded-md flex items-center justify-center bg-gray-800">
-                    <span className="text-gray-500 text-xl">?</span>
+              {/* Room Code Display */}
+              <div className="bg-[#262421] rounded-2xl p-6 mb-6 border border-[#3a3937]">
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Room Code</p>
+                {localCode ? (
+                  <>
+                    <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
+                      <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
+                        {localCode.slice(0, 50)}...
+                      </p>
+                    </div>
+                    <button 
+                      onClick={copyToClipboard}
+                      className={`w-full py-3 rounded-xl font-bold text-lg transition ${
+                        codeCopied 
+                          ? 'bg-[#81b64c] text-white' 
+                          : 'bg-[#3a3937] hover:bg-[#454441] text-white border border-gray-600'
+                      }`}
+                    >
+                      {codeCopied ? '✓ Copied!' : '📋 Copy Code'}
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex items-center justify-center py-8">
+                    <Spinner />
+                    <span className="ml-3 text-gray-400">Generating code...</span>
                   </div>
-                  <div className="flex-1">
-                    <p className="font-semibold text-gray-500 text-sm">Waiting for opponent...</p>
-                    <p className="text-xs text-gray-600">{lobbyMode === 'host' ? 'Black' : 'White'}</p>
-                  </div>
-                  <Spinner />
+                )}
+              </div>
+
+              {/* Enter Response Code */}
+              <div className="bg-[#262421] rounded-2xl p-6 border border-[#3a3937]">
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Enter Friend's Response</p>
+                <div className="flex gap-2 mb-3">
+                  <input
+                    type="text"
+                    value={remoteCodeInput}
+                    onChange={(e) => setRemoteCodeInput(e.target.value)}
+                    placeholder="Paste response code..."
+                    className="flex-1 px-4 py-3 bg-[#1a1916] border border-gray-700 rounded-xl text-white text-sm placeholder-gray-500 focus:border-[#81b64c] focus:outline-none"
+                  />
+                  <button 
+                    onClick={pasteFromClipboard}
+                    className="px-4 py-3 bg-[#3a3937] rounded-xl hover:bg-[#454441] border border-gray-600"
+                  >
+                    📋
+                  </button>
                 </div>
+                <button 
+                  onClick={() => processRemoteCode(remoteCodeInput)}
+                  disabled={!remoteCodeInput}
+                  className="w-full py-3 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#a3d160]"
+                >
+                  Connect
+                </button>
+              </div>
+
+              {errorMsg && (
+                <p className="mt-4 text-red-400 text-sm">{errorMsg}</p>
               )}
             </div>
-          </div>
+          ) : (
+            /* JOIN VIEW */
+            <div className="text-center">
+              <h2 className="text-2xl font-bold mb-2">Join Room</h2>
+              <p className="text-gray-400 text-sm mb-6">Enter the host's room code</p>
+              
+              {/* Enter Host Code */}
+              <div className="bg-[#262421] rounded-2xl p-6 mb-6 border border-[#3a3937]">
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Host's Room Code</p>
+                <div className="flex gap-2 mb-3">
+                  <input
+                    type="text"
+                    value={remoteCodeInput}
+                    onChange={(e) => setRemoteCodeInput(e.target.value)}
+                    placeholder="Paste room code..."
+                    className="flex-1 px-4 py-3 bg-[#1a1916] border border-gray-700 rounded-xl text-white text-sm placeholder-gray-500 focus:border-[#81b64c] focus:outline-none"
+                  />
+                  <button 
+                    onClick={pasteFromClipboard}
+                    className="px-4 py-3 bg-[#3a3937] rounded-xl hover:bg-[#454441] border border-gray-600"
+                  >
+                    📋
+                  </button>
+                </div>
+                <button 
+                  onClick={() => processRemoteCode(remoteCodeInput)}
+                  disabled={!remoteCodeInput}
+                  className="w-full py-3 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#a3d160]"
+                >
+                  Join
+                </button>
+              </div>
 
-          <p className="text-sm text-gray-400 mb-4">
-            {lobbyMode === 'host' 
-              ? "Share your code, then enter your friend's response." 
-              : "Enter Host's code, then share your response."}
-          </p>
+              {/* Response Code (shows after entering host code) */}
+              {localCode && (
+                <div className="bg-[#262421] rounded-2xl p-6 border border-[#81b64c]">
+                  <p className="text-xs text-[#81b64c] uppercase tracking-wider mb-2">✓ Your Response Code</p>
+                  <p className="text-gray-400 text-xs mb-3">Send this back to the host</p>
+                  <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
+                    <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
+                      {localCode.slice(0, 50)}...
+                    </p>
+                  </div>
+                  <button 
+                    onClick={copyToClipboard}
+                    className={`w-full py-3 rounded-xl font-bold transition ${
+                      codeCopied 
+                        ? 'bg-[#81b64c] text-white' 
+                        : 'bg-[#3a3937] hover:bg-[#454441] text-white border border-gray-600'
+                    }`}
+                  >
+                    {codeCopied ? '✓ Copied!' : '📋 Copy Response'}
+                  </button>
+                </div>
+              )}
 
-          {showHelp && (
-            <div className="bg-[#3a3937] p-4 rounded-lg mb-6 text-xs text-gray-300 border-l-4 border-[#81b64c]">
-              <p className="font-bold text-white mb-2">How to Connect:</p>
-              <ol className="list-decimal pl-4 space-y-1">
-                <li><strong>Host</strong> copies "Room Code" and sends it to <strong>Joiner</strong>.</li>
-                <li><strong>Joiner</strong> pastes it into "Enter Host's Code".</li>
-                <li><strong>Joiner</strong> gets a "Response Code" and sends it to <strong>Host</strong>.</li>
-                <li><strong>Host</strong> pastes "Response Code" and clicks Connect.</li>
-              </ol>
+              {errorMsg && (
+                <p className="mt-4 text-red-400 text-sm">{errorMsg}</p>
+              )}
             </div>
           )}
 
-          {/* Step 1: My Code */}
-          <div className="bg-[#262421] p-4 rounded-xl border border-[#3a3937] mb-6 shadow-md">
-            <h3 className="text-[#81b64c] font-bold text-sm uppercase mb-3">
-              {lobbyMode === 'host' ? "1. Your Room Code" : "2. Your Response Code"}
-            </h3>
-            {localCode ? (
-              <div className="flex flex-col items-center">
-                 {/* QR Display */}
-                 <div className="bg-white p-2 rounded-lg mb-3">
-                   {qrUrl && <img src={qrUrl} className="w-48 h-48" alt="QR" />}
-                 </div>
-                 <div className="flex gap-2 w-full">
-                    <button onClick={copyToClipboard} className="flex-1 py-3 bg-[#3a3937] rounded font-semibold text-sm hover:bg-[#454441] border border-gray-600">Copy Code</button>
-                 </div>
-                 <p className="text-xs text-gray-500 mt-2 text-center">
-                   {lobbyMode === 'host' ? "Share this with your friend." : "Show this to the host."}
-                 </p>
+          {/* Connection Status */}
+          {connectionStatus === 'awaiting-response' && (
+            <div className="mt-6 text-center">
+              <div className="flex items-center justify-center gap-2">
+                <Spinner />
+                <span className="text-gray-400 text-sm">Connecting...</span>
               </div>
-            ) : (
-               <div className="flex items-center justify-center h-48 bg-black/20 rounded-lg">
-                 {lobbyMode === 'host' ? <Spinner /> : <span className="text-gray-500 text-sm p-4 text-center">Waiting for Host Code...</span>}
-               </div>
-            )}
-          </div>
-
-          {/* Step 2: Input Remote Code */}
-          <div className="bg-[#262421] p-4 rounded-xl border border-[#3a3937] shadow-md">
-            <h3 className="text-[#81b64c] font-bold text-sm uppercase mb-3">
-              {lobbyMode === 'host' ? "2. Enter Friend's Response" : "1. Enter Host's Code"}
-            </h3>
-            <div className="flex flex-col gap-3">
-               <div className="flex gap-2">
-                 <button onClick={() => setShowScanner(true)} className="flex-1 py-3 bg-[#3a3937] rounded font-semibold text-sm flex items-center justify-center gap-2 hover:bg-[#454441] border border-gray-600">
-                   📷 Scan QR
-                 </button>
-                 <button onClick={pasteFromClipboard} className="flex-1 py-3 bg-[#3a3937] rounded font-semibold text-sm hover:bg-[#454441] border border-gray-600">
-                   📋 Paste
-                 </button>
-               </div>
-               <textarea 
-                  className="w-full bg-black/30 border border-gray-600 rounded p-2 text-xs font-mono h-20 text-gray-300 resize-none focus:border-[#81b64c] focus:outline-none"
-                  placeholder={lobbyMode === 'host' ? "Paste response code here..." : "Paste room code here..."}
-                  value={remoteCodeInput}
-                  onChange={(e) => setRemoteCodeInput(e.target.value)}
-               />
-               <button 
-                 onClick={() => processRemoteCode(remoteCodeInput)}
-                 disabled={!remoteCodeInput}
-                 className="w-full py-3 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-lg transition hover:bg-[#a3d160] shadow-lg"
-               >
-                 Connect
-               </button>
             </div>
+          )}
+
+          {/* Simple Instructions */}
+          <div className="mt-8 text-center">
+            <p className="text-xs text-gray-500">
+              {lobbyMode === 'host' 
+                ? "1. Copy & share code → 2. Get response → 3. Connect" 
+                : "1. Paste host's code → 2. Copy response → 3. Send to host"}
+            </p>
           </div>
         </div>
       </div>
