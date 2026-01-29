@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="64" fill="#302e2b"/>
+  <g transform="translate(56, 56)">
+    <!-- Chessboard pattern -->
+    <rect x="0" y="0" width="100" height="100" fill="#769656"/>
+    <rect x="100" y="0" width="100" height="100" fill="#eeeed2"/>
+    <rect x="200" y="0" width="100" height="100" fill="#769656"/>
+    <rect x="300" y="0" width="100" height="100" fill="#eeeed2"/>
+    <rect x="0" y="100" width="100" height="100" fill="#eeeed2"/>
+    <rect x="100" y="100" width="100" height="100" fill="#769656"/>
+    <rect x="200" y="100" width="100" height="100" fill="#eeeed2"/>
+    <rect x="300" y="100" width="100" height="100" fill="#769656"/>
+    <rect x="0" y="200" width="100" height="100" fill="#769656"/>
+    <rect x="100" y="200" width="100" height="100" fill="#eeeed2"/>
+    <rect x="200" y="200" width="100" height="100" fill="#769656"/>
+    <rect x="300" y="200" width="100" height="100" fill="#eeeed2"/>
+    <rect x="0" y="300" width="100" height="100" fill="#eeeed2"/>
+    <rect x="100" y="300" width="100" height="100" fill="#769656"/>
+    <rect x="200" y="300" width="100" height="100" fill="#eeeed2"/>
+    <rect x="300" y="300" width="100" height="100" fill="#769656"/>
+    <!-- King piece -->
+    <g transform="translate(120, 80)">
+      <path d="M80 20V50H110V80H80V120H50V80H20V50H50V20H80ZM30 160V200H130V160L110 140H50L30 160ZM10 220V250H150V220H10Z" fill="#81b64c" stroke="#ffffff" stroke-width="4"/>
+    </g>
+  </g>
+  <!-- App name -->
+  <text x="256" y="480" text-anchor="middle" font-family="Arial, sans-serif" font-size="48" font-weight="bold" fill="#81b64c">GM Chess</text>
+</svg>

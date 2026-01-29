@@ -1,21 +1,38 @@
 {
-  "name": "Grandmaster Chess",
+  "name": "Grandmaster Pocket Chess",
   "short_name": "GM Chess",
-  "start_url": ".",
+  "description": "Offline Multiplayer Chess with AI Analysis",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#302e2b",
   "theme_color": "#302e2b",
-  "description": "Offline Multiplayer Chess",
+  "categories": ["games", "entertainment"],
   "icons": [
     {
-      "src": "https://www.gstatic.com/images/branding/product/2x/chess_512dp.png",
+      "src": "/icon-192.svg",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/svg+xml",
+      "purpose": "any"
     },
     {
-      "src": "https://www.gstatic.com/images/branding/product/2x/chess_512dp.png",
+      "src": "/icon-512.svg",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
     }
   ]
 }
