@@ -2,7 +2,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import LZString from 'lz-string';
 import QRCode from 'qrcode';
-import { ChessGame, Position, PieceType, Color } from './engine';
+import { ChessGame, Position, PieceType, Color, Piece } from './engine';
+
+// Backend server URL - change this to your deployed server URL
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const WS_URL = BACKEND_URL.replace('http', 'ws');
 
 // Type declaration for BarcodeDetector
 declare global {
@@ -295,6 +299,10 @@ export default function App() {
   const [flipped, setFlipped] = useState(false);
   const [lastMove, setLastMove] = useState<{from: Position, to: Position} | null>(null);
   
+  // Move History Log (like chess.com)
+  const [moveHistory, setMoveHistory] = useState<{moveNum: number, white: string, black: string}[]>([]);
+  const moveHistoryRef = useRef<HTMLDivElement>(null);
+  
   // AI State
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [isAiThinking, setIsAiThinking] = useState(false);
@@ -304,6 +312,11 @@ export default function App() {
   // App Flow State
   const [view, setView] = useState<'home' | 'lobby' | 'game'>('home');
   const [lobbyMode, setLobbyMode] = useState<'host' | 'join'>('host');
+  
+  // Network Mode State
+  const [isOnlineMode, setIsOnlineMode] = useState(false); // true = online server, false = local P2P
+  const [networkAvailable, setNetworkAvailable] = useState(navigator.onLine);
+  const [serverAvailable, setServerAvailable] = useState(false);
   
   // Connection State
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'awaiting-response' | 'connected'>('disconnected');
@@ -322,6 +335,11 @@ export default function App() {
   
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  
+  // Online Mode WebSocket
+  const wsRef = useRef<WebSocket | null>(null);
+  // Generate a unique player ID per session (not persisted, to allow multiple tabs)
+  const playerIdRef = useRef<string>(crypto.randomUUID());
 
   // Generate a random room ID
   const generateRoomId = () => {
@@ -333,12 +351,129 @@ export default function App() {
     return result;
   };
 
+  // Convert position to algebraic notation (e.g., e4, d5)
+  const posToAlgebraic = (pos: Position): string => {
+    return String.fromCharCode(97 + pos.col) + (8 - pos.row);
+  };
+
+  // Generate move notation (simplified algebraic notation)
+  const generateMoveNotation = (
+    piece: Piece,
+    from: Position,
+    to: Position,
+    captured: Piece | null,
+    isCheck: boolean,
+    isCheckmate: boolean,
+    isCastling: boolean
+  ): string => {
+    // Castling
+    if (isCastling) {
+      return to.col > from.col ? 'O-O' : 'O-O-O';
+    }
+
+    let notation = '';
+    const pieceSymbols: Record<PieceType, string> = {
+      'p': '', 'r': 'R', 'n': 'N', 'b': 'B', 'q': 'Q', 'k': 'K'
+    };
+
+    // Piece symbol (pawns have no symbol)
+    if (piece.type !== 'p') {
+      notation += pieceSymbols[piece.type];
+    }
+
+    // For pawns, show file when capturing
+    if (piece.type === 'p' && captured) {
+      notation += String.fromCharCode(97 + from.col);
+    }
+
+    // Capture symbol
+    if (captured) {
+      notation += 'x';
+    }
+
+    // Destination square
+    notation += posToAlgebraic(to);
+
+    // Promotion (always queen in our case)
+    if (piece.type === 'p' && (to.row === 0 || to.row === 7)) {
+      notation += '=Q';
+    }
+
+    // Check/Checkmate
+    if (isCheckmate) {
+      notation += '#';
+    } else if (isCheck) {
+      notation += '+';
+    }
+
+    return notation;
+  };
+
+  // Add move to history
+  const addMoveToHistory = (notation: string, color: Color) => {
+    setMoveHistory(prev => {
+      const newHistory = [...prev];
+      if (color === 'w') {
+        newHistory.push({ moveNum: newHistory.length + 1, white: notation, black: '' });
+      } else {
+        if (newHistory.length > 0) {
+          newHistory[newHistory.length - 1].black = notation;
+        }
+      }
+      return newHistory;
+    });
+    // Auto-scroll to bottom
+    setTimeout(() => {
+      moveHistoryRef.current?.scrollTo({ top: moveHistoryRef.current.scrollHeight, behavior: 'smooth' });
+    }, 50);
+  };
+
   // Sync board state whenever game changes
   useEffect(() => {
     setBoard([...game.board.map(row => [...row])]);
     setTurn(game.turn);
     setWinner(game.winner);
   }, [game]);
+
+  // Network availability detection
+  useEffect(() => {
+    const handleOnline = () => {
+      setNetworkAvailable(true);
+      checkServerAvailability();
+    };
+    const handleOffline = () => {
+      setNetworkAvailable(false);
+      setServerAvailable(false);
+    };
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Initial server check
+    checkServerAvailability();
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Check if backend server is available
+  const checkServerAvailability = async () => {
+    if (!navigator.onLine) {
+      setServerAvailable(false);
+      return;
+    }
+    try {
+      const response = await fetch(`${BACKEND_URL}/health`, { 
+        method: 'GET',
+        signal: AbortSignal.timeout(3000)
+      });
+      setServerAvailable(response.ok);
+    } catch {
+      setServerAvailable(false);
+    }
+  };
 
   // --- Network Logic ---
 
@@ -406,11 +541,236 @@ export default function App() {
     return pc;
   }, [lobbyMode, playerName, playerColor]);
 
+  // --- Online Mode Functions (Backend Server) ---
+  
+  const initOnlineHost = async () => {
+    try {
+      setView('lobby');
+      setLobbyMode('host');
+      setIsOnlineMode(true);
+      setConnectionStatus('connecting');
+      setPlayers([{ name: playerName || 'You (Host)', color: 'w', status: 'waiting' }]);
+      setOpponentName('');
+      resetGame(false);
+      
+      // Create room on server
+      const response = await fetch(`${BACKEND_URL}/room/create?player_id=${playerIdRef.current}`, {
+        method: 'POST'
+      });
+      const data = await response.json();
+      
+      setRoomId(data.room_id);
+      setPlayerColor('w');
+      setLocalCode(data.room_id); // Simple 4-digit code!
+      
+      // Connect WebSocket
+      connectWebSocket(data.room_id);
+    } catch (err) {
+      console.error('Failed to create room:', err);
+      setErrorMsg('Failed to create room. Check your connection.');
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  const initOnlineJoin = async (code: string) => {
+    try {
+      setConnectionStatus('connecting');
+      
+      // Join room on server
+      const response = await fetch(`${BACKEND_URL}/room/join/${code}?player_id=${playerIdRef.current}`, {
+        method: 'POST'
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Failed to join room');
+      }
+      
+      const data = await response.json();
+      console.log('Join response:', data);
+      
+      setRoomId(code);
+      // Convert backend color format to frontend format
+      const myColor: Color = data.color === 'black' ? 'b' : 'w';
+      setPlayerColor(myColor);
+      setPlayers(prev => [
+        ...prev,
+        { name: 'Host', color: 'w', status: 'ready' }
+      ]);
+      
+      // Connect WebSocket
+      connectWebSocket(code);
+    } catch (err: any) {
+      console.error('Failed to join room:', err);
+      setErrorMsg(err.message || 'Failed to join room');
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  const connectWebSocket = (roomCode: string) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    
+    const ws = new WebSocket(`${WS_URL}/ws/${roomCode}?player_id=${playerIdRef.current}`);
+    wsRef.current = ws;
+    
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+    };
+    
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      handleWebSocketMessage(msg);
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      if (connectionStatus === 'connected') {
+        setErrorMsg('Connection lost');
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setErrorMsg('Connection error');
+    };
+  };
+
+  const handleWebSocketMessage = (msg: any) => {
+    console.log('WebSocket message:', msg.type, msg.data);
+    
+    // Helper to convert backend color to frontend color
+    const toColor = (c: string): Color => c === 'white' ? 'w' : 'b';
+    
+    switch (msg.type) {
+      case 'connected':
+        const connectedColor = toColor(msg.data.color);
+        setPlayerColor(connectedColor);
+        console.log('Connected as', connectedColor);
+        // If game is already active (we're the second player), go directly to game
+        if (msg.data.game_state && msg.data.game_state.status === 'active') {
+          console.log('Game already active, starting...');
+          setConnectionStatus('connected');
+          setView('game');
+          setFlipped(connectedColor === 'b');
+        }
+        break;
+        
+      case 'player_connected':
+        console.log('Player connected:', msg.data);
+        setOpponentName(msg.data.player_id?.slice(0, 8) || 'Opponent');
+        const playerConnectedColor = toColor(msg.data.color);
+        setPlayers(prev => {
+          if (!prev.some(p => p.color === playerConnectedColor)) {
+            return [...prev, { name: 'Opponent', color: playerConnectedColor, status: 'connected' }];
+          }
+          return prev.map(p => p.color === playerConnectedColor ? { ...p, status: 'connected' } : p);
+        });
+        break;
+        
+      case 'game_start':
+        console.log('Game starting!');
+        setConnectionStatus('connected');
+        setView('game');
+        setFlipped(playerColor === 'b');
+        break;
+        
+      case 'move':
+        // Apply opponent's move
+        const fromCol = msg.data.from.charCodeAt(0) - 97;
+        const fromRow = 8 - parseInt(msg.data.from[1]);
+        const toCol = msg.data.to.charCodeAt(0) - 97;
+        const toRow = 8 - parseInt(msg.data.to[1]);
+        
+        setGame(prevGame => {
+          const piece = prevGame.getPiece({ row: fromRow, col: fromCol });
+          const captured = prevGame.getPiece({ row: toRow, col: toCol });
+          const movingColor = prevGame.turn;
+          const isCastling = piece?.type === 'k' && Math.abs(toCol - fromCol) > 1;
+          
+          prevGame.move({ row: fromRow, col: fromCol }, { row: toRow, col: toCol });
+          
+          // Generate and record move notation
+          if (piece) {
+            const isCheck = prevGame.isCheck(prevGame.turn);
+            const isCheckmate = prevGame.winner === movingColor;
+            const notation = generateMoveNotation(
+              piece, { row: fromRow, col: fromCol }, { row: toRow, col: toCol },
+              captured, isCheck, isCheckmate, isCastling
+            );
+            addMoveToHistory(notation, movingColor);
+          }
+          
+          setBoard([...prevGame.board.map(row => [...row])]);
+          setTurn(prevGame.turn);
+          setWinner(prevGame.winner);
+          setLastMove({ from: { row: fromRow, col: fromCol }, to: { row: toRow, col: toCol } });
+          setValidMoves([]);
+          setSelected(null);
+          return prevGame;
+        });
+        break;
+        
+      case 'restart':
+        // Opponent requested restart
+        resetGame(false);
+        break;
+        
+      case 'game_over':
+        if (msg.data.winner) {
+          setWinner(msg.data.winner === 'white' ? 'w' : 'b');
+        } else {
+          setWinner('draw');
+        }
+        break;
+        
+      case 'player_disconnected':
+        setErrorMsg('Opponent disconnected');
+        setPlayers(prev => prev.map(p => 
+          p.color === msg.data.color ? { ...p, status: 'waiting' } : p
+        ));
+        break;
+        
+      case 'draw_offer':
+        // Show draw offer UI (can be enhanced)
+        if (confirm('Opponent offers a draw. Accept?')) {
+          wsRef.current?.send(JSON.stringify({ type: 'draw_accept', data: {} }));
+        } else {
+          wsRef.current?.send(JSON.stringify({ type: 'draw_decline', data: {} }));
+        }
+        break;
+        
+      case 'player-info':
+        setOpponentName(msg.name);
+        break;
+    }
+  };
+
+  const sendOnlineMove = (from: Position, to: Position, fen: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const fromSquare = String.fromCharCode(97 + from.col) + (8 - from.row);
+      const toSquare = String.fromCharCode(97 + to.col) + (8 - to.row);
+      
+      wsRef.current.send(JSON.stringify({
+        type: 'move',
+        data: {
+          from: fromSquare,
+          to: toSquare,
+          fen: fen
+        }
+      }));
+    }
+  };
+
+  // --- Offline P2P Mode Functions ---
+
   const initHost = async () => {
     const newRoomId = generateRoomId();
     setRoomId(newRoomId);
     setView('lobby');
     setLobbyMode('host');
+    setIsOnlineMode(false);
     setPlayerColor('w');
     setConnectionStatus('connecting');
     setLocalCode('');
@@ -431,6 +791,7 @@ export default function App() {
     setRoomId('');
     setView('lobby');
     setLobbyMode('join');
+    setIsOnlineMode(false);
     setPlayerColor('b');
     setConnectionStatus('connecting');
     setLocalCode('');
@@ -492,7 +853,21 @@ export default function App() {
         const { from, to } = msg;
         // Apply move and force state updates
         setGame(prevGame => {
+          const piece = prevGame.getPiece(from);
+          const captured = prevGame.getPiece(to);
+          const movingColor = prevGame.turn;
+          const isCastling = piece?.type === 'k' && Math.abs(to.col - from.col) > 1;
+          
           prevGame.move(from, to);
+          
+          // Generate and record move notation
+          if (piece) {
+            const isCheck = prevGame.isCheck(prevGame.turn);
+            const isCheckmate = prevGame.winner === movingColor;
+            const notation = generateMoveNotation(piece, from, to, captured, isCheck, isCheckmate, isCastling);
+            addMoveToHistory(notation, movingColor);
+          }
+          
           // Force new references for all state
           setBoard([...prevGame.board.map(row => [...row])]);
           setTurn(prevGame.turn);
@@ -526,10 +901,24 @@ export default function App() {
     if (connectionStatus === 'connected' && turn !== playerColor) return;
 
     if (selected && validMoves.some(m => m.row === row && m.col === col)) {
+      const piece = game.getPiece(selected);
+      const captured = game.getPiece({ row, col });
+      const movingColor = turn;
+      const isCastling = piece?.type === 'k' && Math.abs(col - selected.col) > 1;
+      
       const success = game.move(selected, { row, col });
       if (success) {
         const moveFrom = selected;
         const moveTo = { row, col };
+        
+        // Generate move notation
+        const isCheck = game.isCheck(game.turn);
+        const isCheckmate = game.winner === movingColor;
+        const notation = generateMoveNotation(
+          piece!, moveFrom, moveTo, captured, isCheck, isCheckmate, isCastling
+        );
+        addMoveToHistory(notation, movingColor);
+        
         // Update all state
         setBoard([...game.board.map(r => [...r])]);
         setLastMove({from: moveFrom, to: moveTo});
@@ -540,7 +929,11 @@ export default function App() {
         setAiAnalysis(null);
         // Send move to opponent
         if (connectionStatus === 'connected') {
-          sendMove(moveFrom, moveTo);
+          if (isOnlineMode) {
+            sendOnlineMove(moveFrom, moveTo, game.getFen());
+          } else {
+            sendMove(moveFrom, moveTo);
+          }
         }
         return;
       }
@@ -568,8 +961,15 @@ export default function App() {
     setLastMove(null);
     setAiAnalysis(null);
     setErrorMsg(null);
-    if (sendSignal && connectionStatus === 'connected' && dataChannelRef.current?.readyState === 'open') {
-      dataChannelRef.current.send(JSON.stringify({ type: 'restart' }));
+    setMoveHistory([]); // Clear move history
+    
+    // Send restart signal based on connection mode
+    if (sendSignal && connectionStatus === 'connected') {
+      if (isOnlineMode && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'restart', data: {} }));
+      } else if (!isOnlineMode && dataChannelRef.current?.readyState === 'open') {
+        dataChannelRef.current.send(JSON.stringify({ type: 'restart' }));
+      }
     }
   };
 
@@ -608,7 +1008,13 @@ export default function App() {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-[#302e2b] p-6 text-center">
         <h1 className="text-4xl font-bold text-white mb-2">GM Pocket Chess</h1>
-        <p className="text-[#81b64c] font-semibold mb-8">Offline • Multiplayer • AI</p>
+        <p className="text-[#81b64c] font-semibold mb-2">Offline • Multiplayer • AI</p>
+        
+        {/* Network Status Indicator */}
+        <div className={`flex items-center gap-2 mb-6 px-3 py-1.5 rounded-full text-xs font-medium ${networkAvailable && serverAvailable ? 'bg-green-900/40 text-green-400' : networkAvailable ? 'bg-yellow-900/40 text-yellow-400' : 'bg-red-900/40 text-red-400'}`}>
+          <span className={`w-2 h-2 rounded-full ${networkAvailable && serverAvailable ? 'bg-green-400' : networkAvailable ? 'bg-yellow-400' : 'bg-red-400'}`}></span>
+          {networkAvailable && serverAvailable ? 'Online Mode Available' : networkAvailable ? 'Server Unreachable' : 'Offline Mode'}
+        </div>
         
         {/* Player Name Input */}
         <div className="w-full max-w-xs mb-6">
@@ -625,26 +1031,56 @@ export default function App() {
         
         <div className="flex flex-col gap-4 w-full max-w-xs">
           <button 
-            onClick={() => { setView('game'); setConnectionStatus('disconnected'); }}
+            onClick={() => { setView('game'); setConnectionStatus('disconnected'); setIsOnlineMode(false); }}
             className="w-full py-4 bg-[#81b64c] hover:bg-[#a3d160] text-white font-bold rounded-xl shadow-lg transition transform active:scale-95"
           >
             Play Local (Pass & Play)
           </button>
           
-          <div className="border-t border-gray-700 my-2"></div>
+          {/* Online Multiplayer Section */}
+          {networkAvailable && serverAvailable && (
+            <>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-gray-700"></div>
+                <span className="text-xs text-[#81b64c] font-medium">🌐 ONLINE MULTIPLAYER</span>
+                <div className="flex-1 h-px bg-gray-700"></div>
+              </div>
+
+              <button 
+                onClick={initOnlineHost}
+                className="w-full py-4 bg-gradient-to-r from-[#81b64c] to-[#6fa33e] hover:from-[#a3d160] hover:to-[#81b64c] text-white font-bold rounded-xl shadow-lg transition transform active:scale-95"
+              >
+                Create Online Room
+              </button>
+              
+              <button 
+                onClick={() => { setView('lobby'); setLobbyMode('join'); setIsOnlineMode(true); setRemoteCodeInput(''); setPlayers([{ name: playerName || 'You (Guest)', color: 'b', status: 'waiting' }]); }}
+                className="w-full py-4 bg-gradient-to-r from-[#4a90a4] to-[#3d7a8c] hover:from-[#5ba8be] hover:to-[#4a90a4] text-white font-bold rounded-xl shadow-lg transition transform active:scale-95"
+              >
+                Join Online Room
+              </button>
+            </>
+          )}
+          
+          {/* Offline P2P Section */}
+          <div className="flex items-center gap-3 mt-2">
+            <div className="flex-1 h-px bg-gray-700"></div>
+            <span className="text-xs text-gray-500 font-medium">📱 LOCAL NETWORK</span>
+            <div className="flex-1 h-px bg-gray-700"></div>
+          </div>
 
           <button 
             onClick={initHost}
             className="w-full py-4 bg-[#3a3937] hover:bg-[#454441] text-white font-bold rounded-xl shadow-lg border border-gray-600 transition transform active:scale-95"
           >
-            Create Room (Host)
+            Create Room (Local P2P)
           </button>
           
           <button 
             onClick={initJoin}
             className="w-full py-4 bg-[#3a3937] hover:bg-[#454441] text-white font-bold rounded-xl shadow-lg border border-gray-600 transition transform active:scale-95"
           >
-            Join Room
+            Join Room (Local P2P)
           </button>
         </div>
         <p className="mt-8 text-xs text-gray-500">Install this app: Menu &gt; Add to Home Screen</p>
@@ -653,6 +1089,120 @@ export default function App() {
   }
 
   if (view === 'lobby') {
+    // Online Mode Lobby
+    if (isOnlineMode) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-screen bg-[#302e2b] text-white p-4">
+          <div className="w-full max-w-sm">
+            
+            {/* Back Button */}
+            <button 
+              onClick={() => { setView('home'); wsRef.current?.close(); setPlayers([]); setRoomId(''); }} 
+              className="text-gray-400 hover:text-white mb-6"
+            >
+              ← Back
+            </button>
+
+            {lobbyMode === 'host' ? (
+              /* ONLINE HOST VIEW */
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-2 mb-2">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                  <span className="text-xs text-green-400 font-medium">ONLINE MODE</span>
+                </div>
+                <h2 className="text-2xl font-bold mb-2">Online Room Created</h2>
+                <p className="text-gray-400 text-sm mb-6">Share this 4-digit code with your friend</p>
+                
+                {/* Simple 4-digit Room Code */}
+                <div className="bg-[#262421] rounded-2xl p-8 mb-6 border border-[#81b64c]">
+                  <p className="text-xs text-[#81b64c] uppercase tracking-wider mb-4">Room Code</p>
+                  {roomId ? (
+                    <>
+                      <div className="text-6xl font-mono font-bold tracking-[0.3em] text-white mb-6">
+                        {roomId}
+                      </div>
+                      <button 
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(roomId);
+                          setCodeCopied(true);
+                          setTimeout(() => setCodeCopied(false), 2000);
+                        }}
+                        className={`w-full py-3 rounded-xl font-bold transition ${
+                          codeCopied 
+                            ? 'bg-[#81b64c] text-white' 
+                            : 'bg-[#3a3937] hover:bg-[#454441] text-white border border-gray-600'
+                        }`}
+                      >
+                        {codeCopied ? '✓ Copied!' : '📋 Copy Code'}
+                      </button>
+                    </>
+                  ) : (
+                    <div className="flex items-center justify-center py-8">
+                      <Spinner />
+                      <span className="ml-3 text-gray-400">Creating room...</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Waiting for opponent */}
+                <div className="bg-[#262421] rounded-2xl p-6 border border-[#3a3937]">
+                  <div className="flex items-center justify-center gap-3">
+                    <Spinner />
+                    <span className="text-gray-400">Waiting for opponent to join...</span>
+                  </div>
+                </div>
+
+                {errorMsg && (
+                  <p className="mt-4 text-red-400 text-sm">{errorMsg}</p>
+                )}
+              </div>
+            ) : (
+              /* ONLINE JOIN VIEW */
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-2 mb-2">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+                  <span className="text-xs text-green-400 font-medium">ONLINE MODE</span>
+                </div>
+                <h2 className="text-2xl font-bold mb-2">Join Online Room</h2>
+                <p className="text-gray-400 text-sm mb-6">Enter the 4-digit room code</p>
+                
+                {/* Enter 4-digit Code */}
+                <div className="bg-[#262421] rounded-2xl p-6 mb-6 border border-[#3a3937]">
+                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-4">Room Code</p>
+                  
+                  <input
+                    type="text"
+                    value={remoteCodeInput}
+                    onChange={(e) => setRemoteCodeInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    placeholder="0000"
+                    className="w-full text-center text-4xl font-mono font-bold tracking-[0.3em] px-4 py-4 bg-[#1a1916] border border-gray-700 rounded-xl text-white placeholder-gray-600 focus:border-[#81b64c] focus:outline-none mb-4"
+                    maxLength={4}
+                  />
+                  
+                  <button 
+                    onClick={() => initOnlineJoin(remoteCodeInput)}
+                    disabled={remoteCodeInput.length !== 4 || connectionStatus === 'connecting'}
+                    className="w-full py-4 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#a3d160]"
+                  >
+                    {connectionStatus === 'connecting' ? (
+                      <span className="flex items-center justify-center gap-2"><Spinner /> Joining...</span>
+                    ) : (
+                      'Join Room'
+                    )}
+                  </button>
+                </div>
+
+                {errorMsg && (
+                  <p className="mt-4 text-red-400 text-sm">{errorMsg}</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+    
+    // Offline P2P Lobby (existing code)
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-[#302e2b] text-white p-4">
         <div className="w-full max-w-sm">
@@ -954,8 +1504,12 @@ export default function App() {
         
         {/* Header / Back */}
         <div className="flex justify-between items-center mb-2 px-1">
-          <button onClick={() => { setView('home'); resetGame(false); peerRef.current?.close(); }} className="text-xs font-bold text-gray-500 hover:text-white">← EXIT GAME</button>
-          {isOnline && <span className="text-xs text-[#81b64c] font-bold tracking-wider">● CONNECTED</span>}
+          <button onClick={() => { setView('home'); resetGame(false); peerRef.current?.close(); wsRef.current?.close(); }} className="text-xs font-bold text-gray-500 hover:text-white">← EXIT GAME</button>
+          {isOnline && (
+            <span className={`text-xs font-bold tracking-wider ${isOnlineMode ? 'text-green-400' : 'text-[#81b64c]'}`}>
+              ● {isOnlineMode ? 'ONLINE' : 'LOCAL'} CONNECTED
+            </span>
+          )}
         </div>
 
         {/* Waiting Banner - TOP */}
@@ -1043,10 +1597,44 @@ export default function App() {
         </div>
 
         {/* Bottom Player */}
-        <div className="flex justify-between items-center mt-1 mb-4 px-1">
+        <div className="flex justify-between items-center mt-1 mb-2 px-1">
            <Avatar color={myColor} name={isOnline ? (playerName || "You") : "White"} />
            {winner && winner === myColor && <span className="text-[#81b64c] font-bold text-xs">WON 🎉</span>}
            {winner && winner !== myColor && winner !== 'draw' && <span className="text-red-500 font-bold text-xs">LOST</span>}
+        </div>
+
+        {/* Move History Log (chess.com style) */}
+        <div className="bg-[#262421] rounded-xl mb-2 border border-[#3a3937] overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[#3a3937]">
+            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Move Log</span>
+            <span className="text-xs text-gray-500">{moveHistory.length} moves</span>
+          </div>
+          <div 
+            ref={moveHistoryRef}
+            className="max-h-24 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700"
+          >
+            {moveHistory.length === 0 ? (
+              <div className="text-center text-gray-500 text-xs py-3">
+                No moves yet
+              </div>
+            ) : (
+              <div className="grid grid-cols-[auto_1fr_1fr] text-xs">
+                {moveHistory.map((move, idx) => (
+                  <React.Fragment key={idx}>
+                    <div className="px-3 py-1.5 text-gray-500 font-mono bg-[#1a1916]">
+                      {move.moveNum}.
+                    </div>
+                    <div className={`px-3 py-1.5 font-mono ${idx === moveHistory.length - 1 && !move.black ? 'bg-[#81b64c]/20 text-[#81b64c]' : 'text-white'}`}>
+                      {move.white}
+                    </div>
+                    <div className={`px-3 py-1.5 font-mono ${idx === moveHistory.length - 1 && move.black ? 'bg-[#81b64c]/20 text-[#81b64c]' : 'text-white'}`}>
+                      {move.black || ''}
+                    </div>
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Action Bar */}
