@@ -1,25 +1,105 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import LZString from 'lz-string';
+import QRCode from 'qrcode';
 import { ChessGame, Position, PieceType, Color } from './engine';
+
+// Type declaration for BarcodeDetector
+declare global {
+  interface Window {
+    BarcodeDetector: typeof BarcodeDetector;
+  }
+  class BarcodeDetector {
+    constructor(options?: { formats: string[] });
+    detect(image: ImageBitmapSource): Promise<{ rawValue: string }[]>;
+    static getSupportedFormats(): Promise<string[]>;
+  }
+}
 
 // --- Icons & Assets ---
 const PieceIcon = ({ type, color, className }: { type: PieceType; color: Color; className?: string }) => {
   const isWhite = color === 'w';
-  const fill = isWhite ? "#f8f8f8" : "#1f1f1f"; 
-  const stroke = isWhite ? "#1f1f1f" : "#f8f8f8";
+  const fill = isWhite ? "#fff" : "#000";
+  const stroke = isWhite ? "#000" : "#fff";
+  const strokeWidth = isWhite ? "1.5" : "1";
   
-  const paths: Record<PieceType, React.ReactNode> = {
-    p: <path d="M12 2C10.9 2 10 2.9 10 4C10 5.1 10.9 6 12 6C13.1 6 14 5.1 14 4C14 2.9 13.1 2 12 2ZM9 7C7.3 7 6 8.3 6 10V12H18V10C18 8.3 16.7 7 15 7H9ZM7 14V18H17V14H7ZM5 20V22H19V20H5Z" />,
-    r: <path d="M5 20V22H19V20H5ZM7 15V18H17V15H7ZM7 5V13H17V5H7ZM5 2V4H8V2H5ZM11 2V4H13V2H11ZM16 2V4H19V2H16Z" />,
-    n: <path d="M17 19H7V21H17V19ZM16 17H8V15H16V17ZM15 6C15 6 15 5.2 14.5 4.5C14 3.8 13.1 3.5 13.1 3.5C13.1 3.5 12.8 2 10.5 2C8.3 2 8 3.5 8 3.5L7 7L9.5 9.5C9.5 9.5 9 11.5 8 13C6 15.5 8 15.5 8 15.5H15.5L17 7L15 6Z" />,
-    b: <path d="M12 2L9 5L10 8L7 11V18H17V11L14 8L15 5L12 2ZM9 13H15V16H9V13ZM9 20V22H15V20H9Z" />,
-    q: <path d="M5 20V22H19V20H5ZM7 18V15H17V18H7ZM9 11L7 6L10.5 8L12 2L13.5 8L17 6L15 11H9Z" />,
-    k: <path d="M12 2V5H15V7H12V10H9V7H6V5H9V2H12ZM7 13V18H17V13L15 11H9L7 13ZM5 20V22H19V20H5Z" />,
+  // High-quality chess piece SVG paths based on classic Staunton design
+  const pieces: Record<PieceType, React.ReactNode> = {
+    p: ( // Pawn
+      <g>
+        <circle cx="22.5" cy="9" r="2.5" />
+        <path d="M15.5 18.5 c0-2 1.5-3 3-3.5 c-1-1-1.5-2.5-1.5-4 c0-2.5 2.5-4.5 5.5-4.5 c3 0 5.5 2 5.5 4.5 c0 1.5-.5 3-1.5 4 c1.5.5 3 1.5 3 3.5" />
+        <path d="M12 24 h21 v-3 h-21 z" />
+        <path d="M14 21 h17 v-2 h-17 z" />
+      </g>
+    ),
+    r: ( // Rook
+      <g>
+        <path d="M9,39 L36,39 L36,36 L9,36 L9,39 z" />
+        <path d="M12.5,32 L14.5,29 L30.5,29 L32.5,32 L12.5,32 z" />
+        <path d="M12,36 L12,32 L33,32 L33,36 L12,36 z" />
+        <path d="M14,29.5 L14,16.5 L31,16.5 L31,29.5 L14,29.5 z" />
+        <path d="M14,16.5 L11,14 L34,14 L31,16.5 L14,16.5 z" />
+        <path d="M11,14 L11,9 L15,9 L15,11 L20,11 L20,9 L25,9 L25,11 L30,11 L30,9 L34,9 L34,14 L11,14 z" />
+      </g>
+    ),
+    n: ( // Knight
+      <g>
+        <path d="M 22,10 C 32.5,11 38.5,18 38,39 L 15,39 C 15,30 25,32.5 23,18" />
+        <path d="M 24,18 C 24.38,20.91 18.45,25.37 16,27 C 13,29 13.18,31.34 11,31 C 9.958,30.06 12.41,27.96 11,28 C 10,28 11.19,29.23 10,30 C 9,30 5.997,31 6,26 C 6,24 12,14 12,14 C 12,14 13.89,12.1 14,10.5 C 13.27,9.506 13.5,8.5 13.5,7.5 C 14.5,6.5 16.5,10 16.5,10 L 18.5,10 C 18.5,10 19.28,8.008 21,7 C 22,7 22,10 22,10" />
+        <path d="M 9.5 25.5 A 0.5 0.5 0 1 1 8.5,25.5 A 0.5 0.5 0 1 1 9.5 25.5 z" />
+        <path d="M 15 15.5 A 0.5 1.5 0 1 1 14,15.5 A 0.5 1.5 0 1 1 15 15.5 z" transform="matrix(0.866,0.5,-0.5,0.866,9.693,-5.173)" />
+      </g>
+    ),
+    b: ( // Bishop
+      <g>
+        <path d="M9,36 c3.39-0.97 10.11,0.43 13.5-2 c3.39,2.43 10.11,1.03 13.5,2 L36,36 L9,36 z" />
+        <path d="M15,32 c2.5,2.5 12.5,2.5 15,0 c0.5-1.5 0-2 0-2 c0-2.5-2.5-4-2.5-4 c5.5-1.5 6-11.5-5-15.5 c-11,4-10.5,14-5,15.5 c0,0-2.5,1.5-2.5,4 c0,0-0.5,0.5 0,2 z" />
+        <path d="M25,8 A2.5,2.5 0 1 1 20,8 A2.5,2.5 0 1 1 25,8 z" />
+        <path d="M17.5,26 L27.5,26 M15,30 L30,30 M22.5,15.5 L22.5,20.5 M20,18 L25,18" fill="none" strokeLinejoin="miter" />
+      </g>
+    ),
+    q: ( // Queen
+      <g>
+        <circle cx="6" cy="12" r="2.75" />
+        <circle cx="14" cy="9" r="2.75" />
+        <circle cx="22.5" cy="8" r="2.75" />
+        <circle cx="31" cy="9" r="2.75" />
+        <circle cx="39" cy="12" r="2.75" />
+        <path d="M9,26 C17.5,24.5 30,24.5 36,26 L38.5,13.5 L31,25 L30.7,10.9 L25.5,24.5 L22.5,10 L19.5,24.5 L14.3,10.9 L14,25 L6.5,13.5 L9,26 z" />
+        <path d="M9,26 C9,28-1.5,30 9,29.5 C17.5,30 30,30.5 36,29.5 C46,30 36,28 36,26 C30,24.5 17.5,24.5 9,26 z" />
+        <path d="M9,29.5 C9,30.5 17.5,33 22.5,33.5 C27.5,33 36,30.5 36,29.5 C30,30.5 17.5,30.5 9,29.5 z" />
+        <path d="M10.5,33.5 C15.5,36.5 29.5,36.5 34.5,33.5" fill="none" />
+        <path d="M11,38.5 A35,35 1 0 0 34,38.5 L34,35.5 A35,35 1 0 1 11,35.5 L11,38.5 z" />
+      </g>
+    ),
+    k: ( // King
+      <g>
+        <path d="M22.5,11.63 L22.5,6" strokeLinejoin="miter" />
+        <path d="M20,8 L25,8" strokeLinejoin="miter" />
+        <path d="M22.5,25 C22.5,25 27,17.5 25.5,14.5 C25.5,14.5 24.5,12 22.5,12 C20.5,12 19.5,14.5 19.5,14.5 C18,17.5 22.5,25 22.5,25" />
+        <path d="M12.5,37 C18,40.5 27,40.5 32.5,37 L32.5,30 C32.5,30 41.5,25.5 38.5,19.5 C34.5,13 25,16 22.5,23.5 L22.5,27 L22.5,23.5 C20,16 10.5,13 6.5,19.5 C3.5,25.5 12.5,30 12.5,30 L12.5,37 z" />
+        <path d="M12.5,30 C18,27 27,27 32.5,30" fill="none" />
+        <path d="M12.5,33.5 C18,30.5 27,30.5 32.5,33.5" fill="none" />
+        <path d="M12.5,37 C18,34 27,34 32.5,37" fill="none" />
+      </g>
+    ),
   };
+
   return (
-    <svg viewBox="0 0 24 24" fill={fill} stroke={stroke} strokeWidth="1.2" className={className} style={{ filter: 'drop-shadow(1px 2px 2px rgba(0,0,0,0.3))' }}>
-      {paths[type]}
+    <svg 
+      viewBox="0 0 45 45" 
+      fill={fill} 
+      stroke={stroke} 
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className} 
+      style={{ 
+        filter: `drop-shadow(1px 2px 3px rgba(0,0,0,0.4))`,
+      }}
+    >
+      {pieces[type]}
     </svg>
   );
 };
@@ -30,6 +110,180 @@ const Spinner = () => (
     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
   </svg>
 );
+
+// QR Code Display Component
+const QRCodeDisplay = ({ data, size = 200 }: { data: string; size?: number }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  useEffect(() => {
+    if (canvasRef.current && data) {
+      QRCode.toCanvas(canvasRef.current, data, {
+        width: size,
+        margin: 2,
+        color: {
+          dark: '#1a1916',
+          light: '#ffffff'
+        },
+        errorCorrectionLevel: 'L'
+      });
+    }
+  }, [data, size]);
+  
+  return <canvas ref={canvasRef} className="rounded-xl" />;
+};
+
+// Fast QR Scanner Component using BarcodeDetector API
+const QRScanner = ({ onScan, onClose }: { onScan: (data: string) => void; onClose: () => void }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const detectorRef = useRef<BarcodeDetector | null>(null);
+  const scanningRef = useRef(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hasScanned, setHasScanned] = useState(false);
+
+  useEffect(() => {
+    let animationId: number;
+    
+    const startScanner = async () => {
+      try {
+        // Check if BarcodeDetector is supported
+        if (!('BarcodeDetector' in window)) {
+          setError('QR scanning not supported on this device. Please paste the code manually.');
+          return;
+        }
+        
+        // Create detector
+        detectorRef.current = new window.BarcodeDetector({ formats: ['qr_code'] });
+        
+        // Get camera stream with optimized settings for fast scanning
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          }
+        });
+        
+        streamRef.current = stream;
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          
+          // Start fast scanning loop
+          const scan = async () => {
+            if (!scanningRef.current || !videoRef.current || !detectorRef.current || hasScanned) return;
+            
+            try {
+              const barcodes = await detectorRef.current.detect(videoRef.current);
+              if (barcodes.length > 0 && barcodes[0].rawValue) {
+                scanningRef.current = false;
+                setHasScanned(true);
+                // Immediate callback - no delay
+                onScan(barcodes[0].rawValue);
+                return;
+              }
+            } catch (e) {
+              // Continue scanning on detection errors
+            }
+            
+            // Request next frame immediately for fast response
+            animationId = requestAnimationFrame(scan);
+          };
+          
+          // Start scanning immediately
+          scan();
+        }
+      } catch (err) {
+        console.error('Scanner error:', err);
+        setError('Could not access camera. Please check permissions or paste code manually.');
+      }
+    };
+    
+    startScanner();
+    
+    return () => {
+      scanningRef.current = false;
+      if (animationId) cancelAnimationFrame(animationId);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [onScan, hasScanned]);
+
+  return (
+    <div className="fixed inset-0 bg-black/95 z-50 flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-white font-bold text-lg">Scan QR Code</h3>
+          <button 
+            onClick={onClose}
+            className="text-gray-400 hover:text-white text-2xl"
+          >
+            ✕
+          </button>
+        </div>
+        
+        {error ? (
+          <div className="bg-red-900/50 text-red-200 p-4 rounded-xl text-center">
+            <p className="text-sm">{error}</p>
+            <button 
+              onClick={onClose}
+              className="mt-4 px-6 py-2 bg-[#3a3937] text-white rounded-lg"
+            >
+              Close
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="relative rounded-2xl overflow-hidden bg-black aspect-square">
+              <video 
+                ref={videoRef} 
+                className="w-full h-full object-cover"
+                playsInline
+                muted
+              />
+              {/* Scanning overlay */}
+              <div className="absolute inset-0 pointer-events-none">
+                <div className="absolute inset-8 border-2 border-[#81b64c] rounded-xl">
+                  <div className="absolute top-0 left-0 w-8 h-8 border-t-4 border-l-4 border-[#81b64c] rounded-tl-xl" />
+                  <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-[#81b64c] rounded-tr-xl" />
+                  <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-[#81b64c] rounded-bl-xl" />
+                  <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-[#81b64c] rounded-br-xl" />
+                </div>
+                {/* Scanning line animation */}
+                <div className="absolute left-8 right-8 top-8 h-0.5 bg-[#81b64c] animate-pulse opacity-75" 
+                  style={{ 
+                    animation: 'scan 1.5s ease-in-out infinite',
+                  }} 
+                />
+              </div>
+              {hasScanned && (
+                <div className="absolute inset-0 bg-[#81b64c]/20 flex items-center justify-center">
+                  <div className="bg-[#81b64c] rounded-full p-4">
+                    <svg className="w-12 h-12 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                </div>
+              )}
+            </div>
+            <p className="text-gray-400 text-sm text-center mt-4">
+              Point your camera at the QR code
+            </p>
+          </>
+        )}
+      </div>
+      <style>{`
+        @keyframes scan {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(calc(100vw - 4rem - 64px)); }
+        }
+      `}</style>
+    </div>
+  );
+};
 
 export default function App() {
   const [game, setGame] = useState(new ChessGame());
@@ -57,6 +311,8 @@ export default function App() {
   const [localCode, setLocalCode] = useState<string>(''); // Code I generate
   const [remoteCodeInput, setRemoteCodeInput] = useState<string>(''); // Code I input
   const [codeCopied, setCodeCopied] = useState(false);
+  const [showQRScanner, setShowQRScanner] = useState(false);
+  const [showQRCode, setShowQRCode] = useState(true);
   
   // Room & Player State
   const [roomId, setRoomId] = useState<string>('');
@@ -413,21 +669,47 @@ export default function App() {
             /* HOST VIEW */
             <div className="text-center">
               <h2 className="text-2xl font-bold mb-2">Create Room</h2>
-              <p className="text-gray-400 text-sm mb-6">Share the code below with your friend</p>
+              <p className="text-gray-400 text-sm mb-6">Share QR code or text code with your friend</p>
               
               {/* Room Code Display */}
               <div className="bg-[#262421] rounded-2xl p-6 mb-6 border border-[#3a3937]">
-                <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Room Code</p>
+                <p className="text-xs text-gray-500 uppercase tracking-wider mb-4">Room Code</p>
                 {localCode ? (
                   <>
-                    <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
-                      <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
-                        {localCode.slice(0, 50)}...
-                      </p>
+                    {/* Toggle between QR and Text */}
+                    <div className="flex gap-2 mb-4">
+                      <button
+                        onClick={() => setShowQRCode(true)}
+                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                          showQRCode ? 'bg-[#81b64c] text-white' : 'bg-[#1a1916] text-gray-400'
+                        }`}
+                      >
+                        📱 QR Code
+                      </button>
+                      <button
+                        onClick={() => setShowQRCode(false)}
+                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                          !showQRCode ? 'bg-[#81b64c] text-white' : 'bg-[#1a1916] text-gray-400'
+                        }`}
+                      >
+                        📝 Text
+                      </button>
                     </div>
+                    
+                    {showQRCode ? (
+                      <div className="flex justify-center mb-4">
+                        <QRCodeDisplay data={localCode} size={200} />
+                      </div>
+                    ) : (
+                      <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
+                        <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
+                          {localCode.slice(0, 50)}...
+                        </p>
+                      </div>
+                    )}
                     <button 
                       onClick={copyToClipboard}
-                      className={`w-full py-3 rounded-xl font-bold text-lg transition ${
+                      className={`w-full py-3 rounded-xl font-bold transition ${
                         codeCopied 
                           ? 'bg-[#81b64c] text-white' 
                           : 'bg-[#3a3937] hover:bg-[#454441] text-white border border-gray-600'
@@ -447,6 +729,24 @@ export default function App() {
               {/* Enter Response Code */}
               <div className="bg-[#262421] rounded-2xl p-6 border border-[#3a3937]">
                 <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Enter Friend's Response</p>
+                
+                {/* Scan QR Button */}
+                <button
+                  onClick={() => setShowQRScanner(true)}
+                  className="w-full py-3 mb-3 bg-[#81b64c] hover:bg-[#a3d160] text-white font-bold rounded-xl transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h2M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                  </svg>
+                  Scan QR Code
+                </button>
+                
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="flex-1 h-px bg-gray-700"></div>
+                  <span className="text-xs text-gray-500">or paste manually</span>
+                  <div className="flex-1 h-px bg-gray-700"></div>
+                </div>
+                
                 <div className="flex gap-2 mb-3">
                   <input
                     type="text"
@@ -465,7 +765,7 @@ export default function App() {
                 <button 
                   onClick={() => processRemoteCode(remoteCodeInput)}
                   disabled={!remoteCodeInput}
-                  className="w-full py-3 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#a3d160]"
+                  className="w-full py-3 bg-[#3a3937] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#454441] border border-gray-600"
                 >
                   Connect
                 </button>
@@ -479,11 +779,29 @@ export default function App() {
             /* JOIN VIEW */
             <div className="text-center">
               <h2 className="text-2xl font-bold mb-2">Join Room</h2>
-              <p className="text-gray-400 text-sm mb-6">Enter the host's room code</p>
+              <p className="text-gray-400 text-sm mb-6">Scan or enter the host's room code</p>
               
               {/* Enter Host Code */}
               <div className="bg-[#262421] rounded-2xl p-6 mb-6 border border-[#3a3937]">
                 <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Host's Room Code</p>
+                
+                {/* Scan QR Button */}
+                <button
+                  onClick={() => setShowQRScanner(true)}
+                  className="w-full py-3 mb-3 bg-[#81b64c] hover:bg-[#a3d160] text-white font-bold rounded-xl transition flex items-center justify-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h2M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                  </svg>
+                  Scan QR Code
+                </button>
+                
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="flex-1 h-px bg-gray-700"></div>
+                  <span className="text-xs text-gray-500">or paste manually</span>
+                  <div className="flex-1 h-px bg-gray-700"></div>
+                </div>
+                
                 <div className="flex gap-2 mb-3">
                   <input
                     type="text"
@@ -502,7 +820,7 @@ export default function App() {
                 <button 
                   onClick={() => processRemoteCode(remoteCodeInput)}
                   disabled={!remoteCodeInput}
-                  className="w-full py-3 bg-[#81b64c] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#a3d160]"
+                  className="w-full py-3 bg-[#3a3937] disabled:bg-gray-700 disabled:text-gray-500 text-white font-bold rounded-xl transition hover:bg-[#454441] border border-gray-600"
                 >
                   Join
                 </button>
@@ -512,12 +830,39 @@ export default function App() {
               {localCode && (
                 <div className="bg-[#262421] rounded-2xl p-6 border border-[#81b64c]">
                   <p className="text-xs text-[#81b64c] uppercase tracking-wider mb-2">✓ Your Response Code</p>
-                  <p className="text-gray-400 text-xs mb-3">Send this back to the host</p>
-                  <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
-                    <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
-                      {localCode.slice(0, 50)}...
-                    </p>
+                  <p className="text-gray-400 text-xs mb-4">Let the host scan this or copy and send</p>
+                  
+                  {/* Toggle between QR and Text */}
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setShowQRCode(true)}
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                        showQRCode ? 'bg-[#81b64c] text-white' : 'bg-[#1a1916] text-gray-400'
+                      }`}
+                    >
+                      📱 QR Code
+                    </button>
+                    <button
+                      onClick={() => setShowQRCode(false)}
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+                        !showQRCode ? 'bg-[#81b64c] text-white' : 'bg-[#1a1916] text-gray-400'
+                      }`}
+                    >
+                      📝 Text
+                    </button>
                   </div>
+                  
+                  {showQRCode ? (
+                    <div className="flex justify-center mb-4">
+                      <QRCodeDisplay data={localCode} size={200} />
+                    </div>
+                  ) : (
+                    <div className="bg-[#1a1916] rounded-xl p-4 mb-4">
+                      <p className="text-xs font-mono text-gray-400 break-all leading-relaxed max-h-24 overflow-y-auto">
+                        {localCode.slice(0, 50)}...
+                      </p>
+                    </div>
+                  )}
                   <button 
                     onClick={copyToClipboard}
                     className={`w-full py-3 rounded-xl font-bold transition ${
@@ -551,11 +896,24 @@ export default function App() {
           <div className="mt-8 text-center">
             <p className="text-xs text-gray-500">
               {lobbyMode === 'host' 
-                ? "1. Copy & share code → 2. Get response → 3. Connect" 
-                : "1. Paste host's code → 2. Copy response → 3. Send to host"}
+                ? "1. Share QR/code → 2. Scan response → 3. Connected!" 
+                : "1. Scan host's QR → 2. Show your QR → 3. Connected!"}
             </p>
           </div>
         </div>
+        
+        {/* QR Scanner Modal */}
+        {showQRScanner && (
+          <QRScanner
+            onScan={(data) => {
+              setShowQRScanner(false);
+              setRemoteCodeInput(data);
+              // Auto-process immediately for fast connection
+              setTimeout(() => processRemoteCode(data), 100);
+            }}
+            onClose={() => setShowQRScanner(false)}
+          />
+        )}
       </div>
     );
   }
