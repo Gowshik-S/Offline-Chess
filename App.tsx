@@ -127,14 +127,30 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   
   // Connection State
-  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'awaiting-response' | 'connected'>('disconnected');
   const [playerColor, setPlayerColor] = useState<Color>('w');
   const [localCode, setLocalCode] = useState<string>(''); // Code I generate
   const [remoteCodeInput, setRemoteCodeInput] = useState<string>(''); // Code I input
   const [showScanner, setShowScanner] = useState(false);
   
+  // Room & Player State
+  const [roomId, setRoomId] = useState<string>('');
+  const [playerName, setPlayerName] = useState<string>('');
+  const [opponentName, setOpponentName] = useState<string>('');
+  const [players, setPlayers] = useState<{name: string, color: Color, status: 'waiting' | 'ready' | 'connected'}[]>([]);
+  
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+
+  // Generate a random room ID
+  const generateRoomId = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
 
   useEffect(() => {
     setBoard([...game.board.map(row => [...row])]);
@@ -161,24 +177,39 @@ export default function App() {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
         setConnectionStatus('connected');
+        // Send player info
+        setTimeout(() => {
+          if (dataChannelRef.current?.readyState === 'open') {
+            dataChannelRef.current.send(JSON.stringify({ 
+              type: 'player-info', 
+              name: playerName || (lobbyMode === 'host' ? 'Host' : 'Guest'),
+              color: playerColor
+            }));
+          }
+        }, 100);
         setView('game');
         if (lobbyMode === 'join') setFlipped(true);
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         setConnectionStatus('disconnected');
+        setPlayers([]);
         setErrorMsg("Connection Lost");
       }
     };
 
     return pc;
-  }, [lobbyMode]);
+  }, [lobbyMode, playerName, playerColor]);
 
   const initHost = async () => {
+    const newRoomId = generateRoomId();
+    setRoomId(newRoomId);
     setView('lobby');
     setLobbyMode('host');
     setPlayerColor('w');
     setConnectionStatus('connecting');
     setLocalCode('');
     setRemoteCodeInput('');
+    setPlayers([{ name: playerName || 'You (Host)', color: 'w', status: 'waiting' }]);
+    setOpponentName('');
     resetGame(false);
     
     const pc = setupPeer();
@@ -190,12 +221,15 @@ export default function App() {
   };
 
   const initJoin = async () => {
+    setRoomId('');
     setView('lobby');
     setLobbyMode('join');
     setPlayerColor('b');
     setConnectionStatus('connecting');
     setLocalCode('');
     setRemoteCodeInput('');
+    setPlayers([{ name: playerName || 'You (Guest)', color: 'b', status: 'waiting' }]);
+    setOpponentName('');
     resetGame(false);
   };
 
@@ -214,9 +248,25 @@ export default function App() {
         pc.ondatachannel = (e) => setupDataChannel(e.channel);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
+        setConnectionStatus('awaiting-response');
+        // Add host to player list
+        setPlayers(prev => {
+          if (!prev.some(p => p.color === 'w')) {
+            return [...prev, { name: 'Host', color: 'w', status: 'ready' }];
+          }
+          return prev;
+        });
       } else {
         // Host receives Answer
         await pc.setRemoteDescription(new RTCSessionDescription(remoteDesc));
+        setConnectionStatus('awaiting-response');
+        // Add guest to player list
+        setPlayers(prev => {
+          if (!prev.some(p => p.color === 'b')) {
+            return [...prev, { name: 'Guest', color: 'b', status: 'ready' }];
+          }
+          return prev;
+        });
       }
     } catch (err) {
       console.error(err);
@@ -226,7 +276,10 @@ export default function App() {
 
   const setupDataChannel = (dc: RTCDataChannel) => {
     dataChannelRef.current = dc;
-    dc.onopen = () => console.log("Data Channel Open");
+    dc.onopen = () => {
+      console.log("Data Channel Open");
+      setPlayers(prev => prev.map(p => ({ ...p, status: 'connected' as const })));
+    };
     dc.onmessage = (e) => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'move') {
@@ -238,6 +291,11 @@ export default function App() {
         setSelected(null);
       } else if (msg.type === 'restart') {
         resetGame(false);
+      } else if (msg.type === 'player-info') {
+        setOpponentName(msg.name);
+        setPlayers(prev => prev.map(p => 
+          p.color === msg.color ? { ...p, name: msg.name, status: 'connected' as const } : p
+        ));
       }
     };
   };
@@ -333,6 +391,19 @@ export default function App() {
         <h1 className="text-4xl font-bold text-white mb-2">GM Pocket Chess</h1>
         <p className="text-[#81b64c] font-semibold mb-8">Offline • Multiplayer • AI</p>
         
+        {/* Player Name Input */}
+        <div className="w-full max-w-xs mb-6">
+          <label className="text-xs text-gray-400 uppercase tracking-wide mb-1 block text-left">Your Name</label>
+          <input 
+            type="text"
+            value={playerName}
+            onChange={(e) => setPlayerName(e.target.value)}
+            placeholder="Enter your name..."
+            className="w-full px-4 py-3 bg-[#262421] border border-gray-600 rounded-xl text-white placeholder-gray-500 focus:border-[#81b64c] focus:outline-none"
+            maxLength={20}
+          />
+        </div>
+        
         <div className="flex flex-col gap-4 w-full max-w-xs">
           <button 
             onClick={() => { setView('game'); setConnectionStatus('disconnected'); }}
@@ -363,18 +434,96 @@ export default function App() {
   }
 
   if (view === 'lobby') {
+    const getStatusColor = (status: string) => {
+      switch (status) {
+        case 'connected': return 'bg-[#81b64c]';
+        case 'ready': return 'bg-yellow-500';
+        default: return 'bg-gray-500';
+      }
+    };
+
+    const getStatusText = () => {
+      switch (connectionStatus) {
+        case 'connected': return '● Connected';
+        case 'awaiting-response': return '◐ Awaiting Response...';
+        case 'connecting': return '○ Waiting for player...';
+        default: return '○ Disconnected';
+      }
+    };
+
     return (
-      <div className="flex flex-col items-center min-h-screen bg-[#302e2b] text-white p-4">
+      <div className="flex flex-col items-center min-h-screen bg-[#302e2b] text-white p-4 overflow-y-auto">
         {showScanner && <QRScanner onScan={(val) => { setShowScanner(false); processRemoteCode(val); }} onCancel={() => setShowScanner(false)} />}
         
         <div className="w-full max-w-md mt-4">
           <div className="flex justify-between items-center mb-4">
-             <button onClick={() => { setView('home'); peerRef.current?.close(); }} className="text-gray-400 hover:text-white">← Back</button>
+             <button onClick={() => { setView('home'); peerRef.current?.close(); setPlayers([]); }} className="text-gray-400 hover:text-white">← Back</button>
              <button onClick={() => setShowHelp(!showHelp)} className="text-[#81b64c] text-sm font-bold">Help?</button>
           </div>
 
           <h2 className="text-2xl font-bold mb-1">{lobbyMode === 'host' ? "Create Room" : "Join Room"}</h2>
-          <p className="text-sm text-gray-400 mb-6">
+          
+          {/* Room Info Banner */}
+          {lobbyMode === 'host' && roomId && (
+            <div className="bg-[#262421] border border-[#81b64c] rounded-lg p-3 mb-4 flex items-center justify-between">
+              <div>
+                <span className="text-xs text-gray-400 uppercase">Room ID</span>
+                <p className="text-2xl font-mono font-bold text-[#81b64c] tracking-widest">{roomId}</p>
+              </div>
+              <div className="text-right">
+                <span className={`text-xs font-semibold ${connectionStatus === 'connected' ? 'text-[#81b64c]' : connectionStatus === 'awaiting-response' ? 'text-yellow-500' : 'text-gray-400'}`}>
+                  {getStatusText()}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Players in Room Section */}
+          <div className="bg-[#262421] p-4 rounded-xl border border-[#3a3937] mb-4 shadow-md">
+            <h3 className="text-[#81b64c] font-bold text-sm uppercase mb-3 flex items-center gap-2">
+              <span>👥</span> Players in Room
+              <span className="ml-auto text-xs font-normal text-gray-400">{players.length}/2</span>
+            </h3>
+            <div className="space-y-2">
+              {players.length === 0 ? (
+                <div className="text-center py-4 text-gray-500 text-sm">
+                  <span className="animate-pulse">Waiting for players...</span>
+                </div>
+              ) : (
+                players.map((player, idx) => (
+                  <div key={idx} className="flex items-center gap-3 bg-[#3a3937] rounded-lg p-3">
+                    <div className={`w-10 h-10 rounded-md flex items-center justify-center ${player.color === 'w' ? 'bg-gray-200' : 'bg-gray-700'}`}>
+                      <PieceIcon type='k' color={player.color} className="w-6 h-6" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-white text-sm">{player.name}</p>
+                      <p className="text-xs text-gray-400">{player.color === 'w' ? 'White' : 'Black'}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${getStatusColor(player.status)} ${player.status !== 'connected' ? 'animate-pulse' : ''}`}></span>
+                      <span className="text-xs text-gray-400 capitalize">{player.status}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+              
+              {/* Empty slot */}
+              {players.length === 1 && (
+                <div className="flex items-center gap-3 bg-[#3a3937]/50 rounded-lg p-3 border-2 border-dashed border-gray-600">
+                  <div className="w-10 h-10 rounded-md flex items-center justify-center bg-gray-800">
+                    <span className="text-gray-500 text-xl">?</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-semibold text-gray-500 text-sm">Waiting for opponent...</p>
+                    <p className="text-xs text-gray-600">{lobbyMode === 'host' ? 'Black' : 'White'}</p>
+                  </div>
+                  <Spinner />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <p className="text-sm text-gray-400 mb-4">
             {lobbyMode === 'host' 
               ? "Share your code, then enter your friend's response." 
               : "Enter Host's code, then share your response."}
@@ -470,7 +619,9 @@ export default function App() {
           <span className="text-gray-200 font-bold text-sm leading-tight">{name}</span>
           <div className="flex h-4 items-center">
              {getDeadPieces(color === 'w' ? 'b' : 'w').map((p, i) => (
-                <PieceIcon key={i} type={p.type} color={color === 'w' ? 'b' : 'w'} className="w-3 h-3 -ml-1" />
+                <span key={i} className="-ml-1">
+                  <PieceIcon type={p.type} color={color === 'w' ? 'b' : 'w'} className="w-3 h-3" />
+                </span>
              ))}
           </div>
        </div>
@@ -491,7 +642,7 @@ export default function App() {
 
         {/* Top Player */}
         <div className="flex justify-between items-center mb-1 px-1">
-           <Avatar color={opponentColor} name={isOnline ? "Opponent" : "Black"} />
+           <Avatar color={opponentColor} name={isOnline ? (opponentName || "Opponent") : "Black"} />
            {winner && winner !== opponentColor && <span className="text-red-500 font-bold text-xs">LOST</span>}
         </div>
 
@@ -563,7 +714,7 @@ export default function App() {
 
         {/* Bottom Player */}
         <div className="flex justify-between items-center mt-1 mb-4 px-1">
-           <Avatar color={myColor} name={isOnline ? "You" : "White"} />
+           <Avatar color={myColor} name={isOnline ? (playerName || "You") : "White"} />
         </div>
 
         {/* Action Bar */}
