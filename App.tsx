@@ -77,13 +77,39 @@ export default function App() {
     return result;
   };
 
+  // Sync board state whenever game changes
   useEffect(() => {
     setBoard([...game.board.map(row => [...row])]);
     setTurn(game.turn);
     setWinner(game.winner);
-  }, [game, turn]);
+  }, [game]);
 
   // --- Network Logic ---
+
+  // Compress SDP to shorter code
+  const compressSDP = (sdp: RTCSessionDescription | null) => {
+    if (!sdp) return '';
+    // Strip unnecessary fields to make code shorter
+    const minimal = {
+      t: sdp.type === 'offer' ? 'o' : 'a',
+      s: sdp.sdp
+    };
+    return LZString.compressToEncodedURIComponent(JSON.stringify(minimal));
+  };
+
+  const decompressSDP = (code: string) => {
+    try {
+      const json = LZString.decompressFromEncodedURIComponent(code);
+      if (!json) return null;
+      const minimal = JSON.parse(json);
+      return {
+        type: minimal.t === 'o' ? 'offer' : 'answer',
+        sdp: minimal.s
+      };
+    } catch {
+      return null;
+    }
+  };
 
   const setupPeer = useCallback(() => {
     // Pure Offline Config: No ICE servers means we rely on local network candidates (Host/Candidates)
@@ -92,9 +118,8 @@ export default function App() {
 
     pc.onicecandidate = (e) => {
       if (e.candidate === null) {
-        // Gathering complete
-        const sdp = JSON.stringify(pc.localDescription);
-        const compressed = LZString.compressToBase64(sdp);
+        // Gathering complete - use compressed format
+        const compressed = compressSDP(pc.localDescription);
         setLocalCode(compressed);
       }
     };
@@ -113,7 +138,8 @@ export default function App() {
           }
         }, 100);
         setView('game');
-        if (lobbyMode === 'join') setFlipped(true);
+        // Auto-flip board based on player color
+        setFlipped(playerColor === 'b');
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         setConnectionStatus('disconnected');
         setPlayers([]);
@@ -160,16 +186,15 @@ export default function App() {
 
   const processRemoteCode = async (code: string) => {
     try {
-      const sdpStr = LZString.decompressFromBase64(code);
-      if (!sdpStr) throw new Error("Invalid Code Format");
-      const remoteDesc = JSON.parse(sdpStr);
+      const remoteDesc = decompressSDP(code.trim());
+      if (!remoteDesc) throw new Error("Invalid Code Format");
       
       let pc = peerRef.current;
       if (!pc) pc = setupPeer();
 
       if (lobbyMode === 'join') {
         // Joiner receives Offer, creates Answer
-        await pc.setRemoteDescription(new RTCSessionDescription(remoteDesc));
+        await pc.setRemoteDescription(new RTCSessionDescription(remoteDesc as RTCSessionDescriptionInit));
         pc.ondatachannel = (e) => setupDataChannel(e.channel);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -183,7 +208,7 @@ export default function App() {
         });
       } else {
         // Host receives Answer
-        await pc.setRemoteDescription(new RTCSessionDescription(remoteDesc));
+        await pc.setRemoteDescription(new RTCSessionDescription(remoteDesc as RTCSessionDescriptionInit));
         setConnectionStatus('awaiting-response');
         // Add guest to player list
         setPlayers(prev => {
@@ -209,11 +234,18 @@ export default function App() {
       const msg = JSON.parse(e.data);
       if (msg.type === 'move') {
         const { from, to } = msg;
-        game.move(from, to);
-        setLastMove({from, to});
-        setTurn(game.turn);
-        setValidMoves([]);
-        setSelected(null);
+        // Apply move and force state updates
+        setGame(prevGame => {
+          prevGame.move(from, to);
+          // Force new references for all state
+          setBoard([...prevGame.board.map(row => [...row])]);
+          setTurn(prevGame.turn);
+          setWinner(prevGame.winner);
+          setLastMove({from, to});
+          setValidMoves([]);
+          setSelected(null);
+          return prevGame;
+        });
       } else if (msg.type === 'restart') {
         resetGame(false);
       } else if (msg.type === 'player-info') {
@@ -240,12 +272,20 @@ export default function App() {
     if (selected && validMoves.some(m => m.row === row && m.col === col)) {
       const success = game.move(selected, { row, col });
       if (success) {
-        setLastMove({from: selected, to: {row, col}});
+        const moveFrom = selected;
+        const moveTo = { row, col };
+        // Update all state
+        setBoard([...game.board.map(r => [...r])]);
+        setLastMove({from: moveFrom, to: moveTo});
         setTurn(game.turn);
-        if (connectionStatus === 'connected') sendMove(selected, { row, col });
+        setWinner(game.winner);
         setSelected(null);
         setValidMoves([]);
         setAiAnalysis(null);
+        // Send move to opponent
+        if (connectionStatus === 'connected') {
+          sendMove(moveFrom, moveTo);
+        }
         return;
       }
     }
@@ -560,22 +600,34 @@ export default function App() {
           {isOnline && <span className="text-xs text-[#81b64c] font-bold tracking-wider">● CONNECTED</span>}
         </div>
 
+        {/* Waiting Banner - TOP */}
+        {!isMyTurn && isOnline && !winner && (
+          <div className="bg-[#262421] border border-[#81b64c] rounded-lg px-4 py-2 mb-2 flex items-center justify-center gap-2">
+            <Spinner />
+            <span className="text-[#81b64c] font-semibold text-sm">Waiting for Opponent's Move...</span>
+          </div>
+        )}
+
+        {/* Your Turn Banner */}
+        {isMyTurn && isOnline && !winner && (
+          <div className="bg-[#81b64c] rounded-lg px-4 py-2 mb-2 flex items-center justify-center">
+            <span className="text-white font-bold text-sm">⚡ Your Turn!</span>
+          </div>
+        )}
+
         {/* Top Player */}
         <div className="flex justify-between items-center mb-1 px-1">
            <Avatar color={opponentColor} name={isOnline ? (opponentName || "Opponent") : "Black"} />
-           {winner && winner !== opponentColor && <span className="text-red-500 font-bold text-xs">LOST</span>}
+           {winner && winner === opponentColor && <span className="text-[#81b64c] font-bold text-xs">WON</span>}
+           {winner && winner !== opponentColor && winner !== 'draw' && <span className="text-red-500 font-bold text-xs">LOST</span>}
         </div>
 
         {/* Board Container with Lock */}
-        <div className={`relative w-full aspect-square rounded-sm shadow-2xl overflow-hidden bg-[#302e2b] transition-all duration-300 ${!isMyTurn && isOnline ? 'grayscale-[0.5] opacity-90' : ''}`}>
+        <div className={`relative w-full aspect-square rounded-sm shadow-2xl overflow-hidden bg-[#302e2b] transition-all duration-300 ${!isMyTurn && isOnline ? 'opacity-80' : ''}`}>
           
-          {/* Waiting Overlay */}
+          {/* Board Lock Overlay */}
           {!isMyTurn && isOnline && !winner && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/10 pointer-events-none">
-                <div className="bg-black/70 text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg backdrop-blur-sm border border-white/10">
-                   Waiting for Opponent...
-                </div>
-            </div>
+            <div className="absolute inset-0 z-30 bg-black/5 pointer-events-auto cursor-not-allowed"></div>
           )}
 
           {/* Actual Board */}
@@ -635,6 +687,8 @@ export default function App() {
         {/* Bottom Player */}
         <div className="flex justify-between items-center mt-1 mb-4 px-1">
            <Avatar color={myColor} name={isOnline ? (playerName || "You") : "White"} />
+           {winner && winner === myColor && <span className="text-[#81b64c] font-bold text-xs">WON 🎉</span>}
+           {winner && winner !== myColor && winner !== 'draw' && <span className="text-red-500 font-bold text-xs">LOST</span>}
         </div>
 
         {/* Action Bar */}
